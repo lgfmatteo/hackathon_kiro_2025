@@ -546,7 +546,7 @@ def main():
     if len(sys.argv) > 1:
         instance = sys.argv[1]
     else:
-        instance = '08'
+        instance = '10'
     
     print(f"Loading instance {instance}...")
     
@@ -556,7 +556,7 @@ def main():
     
     # Solve
     solver = VRPTWSolver(vehicles_df, instance_df)
-    routes = solver.solve(time_limit=540)  # 9 minutes max
+    routes = solver.solve(time_limit=180)  # 9 minutes max
     
     # Save
     solver.save_solution(routes, f'routes_{instance}.csv')
