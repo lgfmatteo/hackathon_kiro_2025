@@ -84,7 +84,7 @@ def result(orders, vehicles_df, depot, phi_depot, lambd_depot):
                 selected_vehicle = vehicle
                 break
         
-        if selected_vehicle is None:
+        if selected_vehicle is None: #si jamais aucun camion ne peut tout contenir, on prend le plus gros
             selected_vehicle = vehicles_df_sorted.iloc[-1]
         
         route = {
