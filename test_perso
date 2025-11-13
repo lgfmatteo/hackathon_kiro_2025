@@ -1,0 +1,339 @@
+import pandas as pd
+import math
+import time
+from typing import List, Dict, Any, Tuple
+
+# --- 0. CONSTANTES GLOBALES ET PRÉPARATION ---
+
+RHO = 6.371e6  # Rayon de la Terre en mètres
+T_PERIOD = 86400.0  # Période de 1 jour en secondes
+OMEGA = 2 * math.pi / T_PERIOD  # Fréquence angulaire
+
+# --- 1. CHARGEMENT DES DONNÉES (TOUTES LES INSTANCES) ---
+
+def load_all_data():
+    """ Charge les 10 instances et les véhicules depuis le dossier 'instances/'. """
+    
+    all_instances = []
+    file_names = [f'instance_{s:02d}.csv' for s in range(1, 11)]
+    
+    # 1. Chargement des instances
+    for file_name in file_names:
+        try:
+            df = pd.read_csv(f'instances/{file_name}')
+            df = df.sort_values('window_start', ascending=True, na_position='first').reset_index(drop=True)
+            all_instances.append(df.to_dict('records'))
+        except FileNotFoundError:
+            print(f"Erreur: Le fichier instances/{file_name} n'a pas été trouvé. Arrêt.")
+            return [], []
+
+    # 2. Chargement des véhicules 
+    try:
+        df = pd.read_csv('instances/vehicles.csv')    
+        vehicules = df.to_dict('records')
+    except FileNotFoundError:
+        print("Erreur: Le fichier instances/vehicles.csv n'a pas été trouvé. Arrêt.")
+        return all_instances, []
+        
+    return all_instances, vehicules
+
+# --- 2. FONCTIONS MATHÉMATIQUES ET DE VÉRIFICATION (CORE MODEL) ---
+
+def convert_to_meters(lat_i, lon_i, lat_j, lon_j, depot_lat):
+    deg_to_rad = math.pi / 180.0
+    dy = RHO * deg_to_rad * (lat_j - lat_i)
+    dx = RHO * math.cos(depot_lat * deg_to_rad) * deg_to_rad * (lon_j - lon_i)
+    return dx, dy
+
+def calc_distances(dx, dy):
+    delta_M = abs(dx) + abs(dy)
+    delta_E = math.sqrt(dx**2 + dy**2)
+    return delta_M, delta_E
+
+def calc_gamma_factor(t, vehicle_data):
+    gamma = 0.0
+    t_mod = t % T_PERIOD
+    for n in range(4):
+        alpha = vehicle_data.get(f'fourier_cos_{n}', 0) 
+        beta = vehicle_data.get(f'fourier_sin_{n}', 0)
+        gamma += alpha * math.cos(n * OMEGA * t_mod) + beta * math.sin(n * OMEGA * t_mod)
+    return gamma
+
+def calc_travel_time(node_i, node_j, t_depart, vehicle_data, depot_lat):
+    lat_i, lon_i = node_i['latitude'], node_i['longitude']
+    lat_j, lon_j = node_j['latitude'], node_j['longitude']
+    dx, dy = convert_to_meters(lat_i, lon_i, lat_j, lon_j, depot_lat)
+    delta_M, _ = calc_distances(dx, dy)
+    speed = vehicle_data['speed']
+    parking_time = vehicle_data['parking_time']
+    tau_ref = (delta_M / speed) + parking_time 
+    gamma = calc_gamma_factor(t_depart, vehicle_data)
+    tau_final = tau_ref * gamma 
+    return tau_final, delta_M
+
+def check_and_calculate_route(route_nodes, vehicle_data, depot_lat):
+    """ Vérifie la faisabilité temporelle et calcule le coût total. """
+    total_fuel_cost = 0.0
+    current_departure_time = 0.0
+    orders_coords = []
+    
+    full_route = route_nodes + [route_nodes[0]]
+    
+    for k in range(1, len(full_route)):
+        node_i = full_route[k-1]
+        node_j = full_route[k]
+        
+        tau, delta_M = calc_travel_time(node_i, node_j, current_departure_time, vehicle_data, depot_lat)
+        
+        total_fuel_cost += delta_M * vehicle_data['fuel_cost']
+        arrival_time = current_departure_time + tau
+        
+        if node_j['id'] != 0:
+            window_end = node_j['window_end']
+            if arrival_time > window_end:
+                return float('inf'), False
+            
+            window_start = node_j['window_start']
+            start_delivery_time = max(arrival_time, window_start)
+            current_departure_time = start_delivery_time + node_j['delivery_duration']
+            
+            orders_coords.append((node_j['latitude'], node_j['longitude']))
+            
+        else:
+            current_departure_time = arrival_time
+            
+    # Calcul du Coût de Rayon (c^radius)
+    radius_cost = 0.0
+    if len(orders_coords) > 1:
+        max_dist_E = 0.0
+        for i in range(len(orders_coords)):
+            for j in range(i + 1, len(orders_coords)):
+                lat_i, lon_i = orders_coords[i]
+                lat_j, lon_j = orders_coords[j]
+                
+                dx, dy = convert_to_meters(lat_i, lon_i, lat_j, lon_j, depot_lat)
+                _, delta_E = calc_distances(dx, dy)
+                max_dist_E = max(max_dist_E, delta_E)
+                
+        radius_cost = vehicle_data['radius_cost'] * (0.5 * max_dist_E)**2
+        
+    # Coûts Totaux
+    rental_cost = vehicle_data['rental_cost']
+    total_cost = rental_cost + total_fuel_cost + radius_cost
+    
+    return total_cost, True
+
+# --- 3. HEURISTIQUE GLOUTONNE PAR TRANCHES ET PROXIMITÉ (HG-TP) ---
+
+def hg_tp_solver(instance_data: List[Dict], vehicles_data: List[Dict], KONSTANT: float = 1.2):
+    
+    depot = next(item for item in instance_data if item['id'] == 0)
+    depot_lat = depot['latitude']
+    all_orders = [item for item in instance_data if item['id'] != 0]
+    
+    # --- 3.1 Calcul des constantes ---
+    
+    max_cap_vehicle_data = max(vehicles_data, key=lambda v: v['max_capacity'])
+    total_weight = sum(order['order_weight'] for order in all_orders)
+    
+    Kamion_min = math.ceil(total_weight / max_cap_vehicle_data['max_capacity'])
+    N_sommet_total = len(all_orders)
+    
+    N_sommet_par_tranche = math.ceil(N_sommet_total / (Kamion_min * KONSTANT))
+    
+    # --- 3.2 Création des Tranches Horaires ---
+    
+    tranches_sommet: List[List[Dict]] = []
+    available_orders = all_orders.copy()
+    
+    while available_orders:
+        current_tranche_size = min(N_sommet_par_tranche, len(available_orders))
+        
+        current_tranche_chronological = available_orders[:current_tranche_size]
+        available_orders = available_orders[current_tranche_size:]
+        
+        # Trier par proximité (Manhattan) à l'origine
+        for order in current_tranche_chronological:
+            dx, dy = convert_to_meters(depot['latitude'], depot['longitude'], order['latitude'], order['longitude'], depot_lat)
+            order['manhattan_dist_to_depot'] = abs(dx) + abs(dy)
+        current_tranche_chronological.sort(key=lambda o: o['manhattan_dist_to_depot'])
+        
+        tranches_sommet.append(current_tranche_chronological)
+        
+    T = len(tranches_sommet) 
+
+    # --- 3.3 Simulation des Routes ---
+    
+    num_camions = N_sommet_par_tranche
+    routes: List[Dict[str, Any]] = []
+    
+    # Initialisation des routes (tous les camions sont de capacité max au départ)
+    for c_id in range(num_camions):
+        routes.append({
+            'id': c_id,
+            'current_node': depot,
+            'current_time': 0.0,
+            'load': 0.0,
+            'nodes_visited': [depot],
+            'vehicle_data': max_cap_vehicle_data,
+            'orders_to_deliver': [],
+        })
+        
+    # Affectation initiale dans la Tranche 0
+    for c_id in range(num_camions):
+        if c_id < len(tranches_sommet[0]):
+            routes[c_id]['orders_to_deliver'].append(tranches_sommet[0][c_id])
+            
+    # Traitement des Tranches (T0 à T-1)
+    for i in range(T):
+        current_tranche = tranches_sommet[i]
+        remaining_in_current_tranche = []
+        
+        # Livraison des commandes assignées à cette tranche et transition vers la suivante
+        for route in routes:
+            
+            if len(route['orders_to_deliver']) <= i: continue 
+                
+            target_node = route['orders_to_deliver'][i]
+            
+            # Vérification de capacité / Faisabilité temporelle
+            if route['load'] + target_node['order_weight'] > route['vehicle_data']['max_capacity']:
+                remaining_in_current_tranche.append(target_node)
+                continue
+                
+            tau, _ = calc_travel_time(route['current_node'], target_node, route['current_time'], route['vehicle_data'], depot_lat)
+            arrival_time = route['current_time'] + tau
+            
+            if arrival_time > target_node['window_end']:
+                remaining_in_current_tranche.append(target_node)
+                continue
+
+            # Mise à jour de la route (le camion livre)
+            start_delivery_time = max(arrival_time, target_node['window_start'])
+            route['current_time'] = start_delivery_time + target_node['delivery_duration']
+            route['current_node'] = target_node
+            route['load'] += target_node['order_weight']
+            route['nodes_visited'].append(target_node)
+
+            # Assignation du Prochain Sommet (Tranche i+1)
+            if i + 1 < T:
+                next_tranche = tranches_sommet[i+1]
+                
+                best_next_node = None
+                min_manhattan_dist = float('inf')
+                
+                unassigned_in_next_tranche = [o for o in next_tranche if o not in [r['orders_to_deliver'][-1] for r in routes if len(r['orders_to_deliver']) > i+1]]
+                
+                if unassigned_in_next_tranche:
+                    for next_node in unassigned_in_next_tranche:
+                        dx, dy = convert_to_meters(route['current_node']['latitude'], route['current_node']['longitude'], 
+                                                   next_node['latitude'], next_node['longitude'], depot_lat)
+                        manhattan_dist = abs(dx) + abs(dy)
+                        
+                        if manhattan_dist < min_manhattan_dist:
+                            min_manhattan_dist = manhattan_dist
+                            best_next_node = next_node
+                
+                if best_next_node:
+                    route['orders_to_deliver'].append(best_next_node)
+        
+        # Gestion des Transferts de Sommets non livrés
+        if remaining_in_current_tranche and i + 1 < T:
+            # Réinsérer les non-livrés au début de la liste de la prochaine tranche
+            tranches_sommet[i+1] = remaining_in_current_tranche + tranches_sommet[i+1]
+    
+    # --- 3.4 Finalisation et Optimisation de la Capacité ---
+    
+    final_routes_data: List[Dict[str, Any]] = []
+    total_final_cost = 0.0
+    
+    for route in routes:
+        final_route_nodes = route['nodes_visited']
+        
+        if len(final_route_nodes) <= 1:
+            continue
+            
+        # 1. Retour au dépôt
+        if final_route_nodes[-1]['id'] != 0:
+            final_route_nodes.append(depot)
+        
+        route_for_calc = final_route_nodes[:-1] # Route sans le dépôt final
+
+        # 2. Calculer le coût INITIAL de cette route
+        initial_cost, is_feasible = check_and_calculate_route(route_for_calc, route['vehicle_data'], depot_lat)
+
+        if not is_feasible: continue
+            
+        min_substitute_cost = initial_cost
+        best_substitute_vehicle = route['vehicle_data']
+        current_route_weight = sum(n['order_weight'] for n in final_route_nodes if n['id'] != 0)
+        
+        # 3. Substitution de Véhicule
+        sorted_vehicles = sorted(vehicles_data, key=lambda v: v['rental_cost'])
+        
+        for substitute_v in sorted_vehicles:
+            if substitute_v['max_capacity'] >= current_route_weight:
+                
+                new_cost, is_feasible = check_and_calculate_route(route_for_calc, substitute_v, depot_lat)
+                
+                if is_feasible and new_cost < min_substitute_cost:
+                    min_substitute_cost = new_cost
+                    best_substitute_vehicle = substitute_v
+        
+        # 4. Enregistrement du résultat
+        final_routes_data.append({
+            'family': best_substitute_vehicle['family'],
+            'orders': [n['id'] for n in final_route_nodes if n['id'] != 0],
+            'cost': min_substitute_cost
+        })
+        total_final_cost += min_substitute_cost
+        
+    return total_final_cost, final_routes_data
+
+# --- 4. EXÉCUTION PRINCIPALE (BOUCLE SUR TOUTES LES INSTANCES) ---
+
+def run_kiro_hg_tp_solver():
+    
+    start_time = time.time()
+    
+    # 1. Chargement des données
+    all_instances, vehicles_data = load_all_data()
+    
+    if not all_instances or not vehicles_data:
+        print("\nArrêt du programme : Chargement des données incomplet.")
+        return
+
+    total_kiro_cost = 0.0
+    
+    print("=========================================================")
+    print(f"  HEURISTIQUE HG-TP - VRPTW KIRO 2025")
+    print("=========================================================")
+    
+    # Boucle sur les 10 instances
+    for i, instance_data in enumerate(all_instances):
+        instance_id = i + 1
+        instance_start_time = time.time()
+        
+        print(f"\n--- Instance {instance_id:02d} ---")
+        
+        # 2. Exécution de l'heuristique
+        final_cost, _ = hg_tp_solver(instance_data, vehicles_data)
+        
+        total_kiro_cost += final_cost
+        instance_duration = time.time() - instance_start_time
+        
+        print(f"  Coût Final de l'Instance {instance_id:02d}: {final_cost:.2f} €")
+        print(f"  Durée: {instance_duration:.2f}s")
+
+
+    # --- 5. Affichage du Résultat Final ---
+    print("\n=========================================================")
+    print("           RÉSUMÉ DES RÉSULTATS KIRO")
+    print("=========================================================")
+    print(f"Coût Total des 10 Instances: {total_kiro_cost:.2f} €")
+    print(f"Temps total d'exécution: {time.time() - start_time:.2f}s")
+    print("=========================================================")
+    return total_kiro_cost
+
+if __name__ == "__main__":
+    run_kiro_hg_tp_solver()
