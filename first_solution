@@ -3,9 +3,8 @@ import math
 EARTH_RADIUS = 6.371e6
 TWO_PI_OVER_360 = 2 * math.pi / 360
 
-def latlon_to_cartesian(phi_i, lambd_i, phi_y, lambd_y, phi_0 = phi_depot):
-    # Calcul direct des coordonnées x, y selon les formules
-    delta_y = EARTH_RADIUS * TWO_PI_OVER_360 * (phi_y - phi_i)
+def latlon_to_cartesian(phi_i, lambd_i, phi_j, lambd_j, phi_0 = phi_depot):
+    delta_y = EARTH_RADIUS * TWO_PI_OVER_360 * (phi_j - phi_i)
     delta_x = EARTH_RADIUS * math.cos(TWO_PI_OVER_360 * phi0) * TWO_PI_OVER_360 * (lambd_j - lambd_i)
     return delta_x, delta_y
 
@@ -16,3 +15,47 @@ def manhattan_distance(phi_i, lambd_i, phi_j, lambd_j, phi0):
 def euclidean_distance(phi_i, lambd_i, phi_j, lambd_j, phi0):
     delta_x, delta_y = latlon_to_cartesian(phi_i, lambd_i, phi_j, lambd_j, phi0)
     return math.sqrt(delta_x ** 2 + delta_y ** 2)
+
+def travel_time(departure_time_sec, phi_i, lambd_i, phi_j, lambd_j, speed, parking_time, alpha_coef, beta_coef, phi0):
+    dist_manhattan = manhattan_distance(phi_i, lambd_i, phi_j, lambd_j, phi0)
+    tau_ref = dist_manhattan / speed + parking_time
+    omega = 2 * math.pi / SECONDS_PER_DAY
+    gamma = 0
+    for n in range(4):
+        gamma += alpha_coef[n] * math.cos(n * omega * departure_time_sec) + beta_coef[n] * math.sin(n * omega * departure_time_sec)
+    tau = tau_ref * gamma
+    return tau
+
+def is_delivery_feasible(time_window_start, time_window_end, vehicle_capacity_remaining, order_capacity, 
+                         phi_current, lambd_current, phi_delivery, lambd_delivery, current_time, 
+                         unload_duration, vehicle_speed, parking_time, alpha_coef, beta_coef, phi0):
+    """
+    Détermine si une livraison est faisable selon les contraintes de capacité, temps et fenêtre horaire.
+    """
+    
+    # Contrainte 1 : Capacité suffisante dans le véhicule
+    if vehicle_capacity_remaining < order_capacity:
+        return False
+    
+    # Contrainte 2 : Calcul du temps de trajet
+    travel_time_duration = travel_time(current_time, phi_current, lambd_current, phi_delivery, lambd_delivery, 
+                                       vehicle_speed, parking_time, alpha_coef, beta_coef, phi0)
+    
+    # Temps d'arrivée à la livraison
+    arrival_time = current_time + travel_time_duration
+    
+    # Temps de fin de livraison (arrivée + déchargement)
+    end_delivery_time = arrival_time + unload_duration
+    
+    # Contrainte 3 : Fenêtre de temps
+    # L'arrivée doit être entre le début et la fin de la fenêtre
+    if arrival_time < time_window_start or arrival_time > time_window_end:
+        return False
+    
+    # Vérifier que le déchargement se termine avant la fin de la fenêtre
+    if end_delivery_time > time_window_end:
+        return False
+    
+    # Toutes les contraintes sont satisfaites
+    return True
+
