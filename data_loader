@@ -1,65 +1,9 @@
 import pandas as pd
-import os
-import glob
 
-def charger_donnees_instances(file_pattern: str = "instance_*.csv") -> dict:
-    """
-    Lit tous les fichiers CSV correspondant au modèle (par défaut 'instance_XX.csv')
-    et les charge dans un dictionnaire de DataFrames.
+datas = []
 
-    Args:
-        file_pattern: Modèle de nom de fichier à rechercher (ex: "instance_*.csv").
+for s in ['01', '02', '03', '04', '05', '06', '07', '08', '09', '10'] :
+    df = pd.read_csv('instances/instance_' + s + '.csv')
+    datas.append(df.to_dict('records'))
 
-    Returns:
-        Un dictionnaire où la clé est le numéro de l'instance (ex: '01') 
-        et la valeur est le DataFrame correspondant.
-    """
-    instances_data = {}
-    
-    # Utilisation de glob pour trouver tous les fichiers correspondant au modèle
-    instance_files = sorted(glob.glob(file_pattern))
-
-    if not instance_files:
-        print(f"Aucun fichier trouvé avec le modèle : {file_pattern}")
-        return instances_data
-    
-    print(f"Fichiers d'instances détectés : {len(instance_files)}")
-    
-    for file_path in instance_files:
-        try:
-            # Extraction du nom du fichier sans l'extension
-            file_name = os.path.basename(file_path)
-            # Le numéro de l'instance est la partie entre '_' et '.' (ex: '01' dans 'instance_01.csv')
-            instance_id = file_name.split('_')[-1].split('.')[0]
-            
-            print(f"Lecture du fichier : {file_name} (ID: {instance_id})...")
-            
-            # Lecture du CSV. Le séparateur par défaut est souvent la virgule, 
-            # mais on le précise pour être sûr.
-            df = pd.read_csv(file_path)
-            instances_data[instance_id] = df
-            
-        except Exception as e:
-            print(f"Erreur lors de la lecture du fichier {file_path}: {e}")
-            
-    print("\nDonnées de toutes les instances lues avec succès.")
-    return instances_data
-
-# --- Exécution ---
-# Le modèle de fichier est "instance_XX.csv", donc "instance_*.csv" est approprié
-# pour charger les 10 fichiers de 01 à 10.
-if __name__ == "__main__":
-    # La fonction gère la recherche des fichiers automatiquement
-    instances_data = charger_donnees_instances()
-
-    if instances_data:
-        # Affichage d'un aperçu de la première instance lue (normalement '01')
-        first_instance_key = sorted(instances_data.keys())[0]
-        df_example = instances_data[first_instance_key]
-        
-        print(f"\n--- Aperçu de l'Instance {first_instance_key} (instance_0{first_instance_key}.csv) ---")
-        print("Premières lignes :")
-        print(df_example.head())
-        
-        print("\nInformations sur les colonnes :")
-        print(df_example.info())
+print(datas)
