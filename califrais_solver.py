@@ -546,7 +546,7 @@ def main():
     if len(sys.argv) > 1:
         instance = sys.argv[1]
     else:
-        instance = '07'
+        instance = '08'
     
     print(f"Loading instance {instance}...")
     
